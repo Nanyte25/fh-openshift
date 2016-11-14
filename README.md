@@ -6,26 +6,37 @@ the openshift-ansible repository
 ## Workflow:
 
 ### Create your environment
+
   Create Python virtual env
+
   Pip install boto, boto3, socket
+
   Install Ansible 2.2.0 from source / http://docs.ansible.com/ansible/intro_installation.html#running-from-source
 
   git clone https://github.com/feedhenry/fh-openshift
+
   git clone https://github.com/openshift/openshift-ansible.git
 
 ### Deploy rhm site infrastructure
-  ansible-playbook playbooks/aws-infrastructure.yaml --tags grid (soon to be site)
+
+```ansible-playbook playbooks/aws-infrastructure.yaml --tags grid (soon to be site)```
 
 ### Deploy rhm rhmap infrastructure
-  ansible-playbook playbooks/aws-infrastructure.yaml --tags rhmap
+
+```ansible-playbook playbooks/aws-infrastructure.yaml --tags rhmap```
 
 ### Prepare infrastructure
-  ansible-playbook playbooks/openshift-install.yaml
-  Subscription account credentials and manager pool req'd!
+
+```ansible-playbook playbooks/openshift-install.yaml```
+
+  NOTE: Subscription account credentials and manager pool req'd!
 
 ### Install OpenShift
-  Prepare ssh client / vi ~/.ssh/conf
-  Note that the static data values Hostname need to be dealt with manually at this time
+
+  Prepare ssh client / ~/.ssh/conf
+
+  NOTE: that the static data values Hostname need to be dealt with manually at this time
+
 ```
 Host US-TOM
      User                       ec2-user
@@ -73,7 +84,6 @@ Host 10.*
      ControlPersist         8h
 ```
 
-
   Prepare Ansible client / ansible.cfg
 ```
 # config file for ansible -- http://ansible.com/
@@ -101,12 +111,17 @@ ssh_args = -F /Users/ccallega/.ssh/config -o ForwardAgent=yes -o ControlMaster=a
 control_path = ~/.ssh/mux-%%r@%%h:%%p
 ```
 
-
   Prepare Ansible dynamic inventory
-    inventory/aws/hosts/ec2.py --refresh-cache
+
+```inventory/aws/hosts/ec2.py --refresh-cache```
 
   Prepare Ansible hosts file / inventory/aws/hosts/hosts
+
     More to come here
 
   Execute Ansible playbook
-    ansible-playbook -i inventory/aws/hosts playbooks/byo/openshift-cluster/config.yml
+
+```ansible-playbook -i inventory/aws/hosts playbooks/byo/openshift-cluster/config.yml```
+
+
+### Install RHMAP onto OpenShift
