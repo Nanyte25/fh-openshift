@@ -17,6 +17,16 @@ the openshift-ansible repository
 
   git clone https://github.com/openshift/openshift-ansible.git
 
+  set the following environment values
+
+```export AWS_ACCESS_KEY_ID=ABC123```
+
+```export AWS_SECRET_ACCESS_KEY=DEF456```
+
+  NOTE: Currently Ansible playbooks utilize shell environment variables.  Please
+  ensure the values are correct.  In the future we will consider integrating
+  into awscli ~/.aws/<cred files> or ~/.boto/<cred files>
+
 ### Deploy rhm site infrastructure
 
 ```ansible-playbook playbooks/aws-infrastructure.yaml --tags grid (soon to be site)```
