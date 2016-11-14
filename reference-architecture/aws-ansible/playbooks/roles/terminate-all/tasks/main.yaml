@@ -1,0 +1,36 @@
+---
+- name: Remove policy used for user
+  iam_policy:
+    iam_name: "{{ s3_username }}"
+    iam_type: user
+    policy_name: S3FullAccess
+    state: absent
+    region: "{{ region }}"
+  ignore_errors: true
+- name: Remove S3 OpenShift registry user
+  iam:
+    iam_type: user
+    name: "{{ s3_username }}"
+    state: absent
+  ignore_errors: true
+- name: Remove Cloudformation
+  cloudformation:
+    stack_name: "OpenShift-Infra"
+    state: absent
+    template: roles/cloudformation-infra/files/greenfield.json
+    region: "{{ region }}"
+  ignore_errors: true
+- name: lookup up vols
+  ec2_vol_facts:
+    region: "{{ region }}"
+    filters:
+      status: available
+  register: vols
+- name: cleanup
+  ec2_vol:
+    id: "{{ item.id }}"
+    state: absent
+    region: "{{ region }}"
+  with_items:
+    - "{{ vols.volumes }}"
+  when: ci

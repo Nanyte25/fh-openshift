@@ -1,0 +1,1416 @@
+---
+#TODO: Ensure playbook dies if rhmap[]['profile'] doesn match current account
+#- name: Verify AWS account
+
+#TODO: All region values need to be updated to rhmap['region']
+#TODO: All Grid tag values and r should be consolidated
+#      into a single grid keyvalue that comes from fh-aws-environment-registry.json
+#TODO: Why is this Task changing at every run??
+- name: "Creating AWS VPC/IGW/Subnets for site {{ rhmap['site'] }}"
+  ec2_vpc:
+    state: present
+    cidr_block: "10.0.0.0/16"
+    dns_hostnames: yes
+    dns_support: yes
+    internet_gateway: True
+    region: "{{ rhmap['region'] }}"
+    resource_tags:
+      Name: "rhm-vpc-{{ rhmap['site'] | lower }}"
+      Grid: "{{ rhmap['grid'] }}"
+    subnets:
+      - cidr: "{{ public_subnet_blocks.0.cidr }}"
+        az: "{{ vpc_subnet_azs.0 }}"
+        resource_tags: { "Name":"rhm-net-{{ rhmap['site'] }}-public" }
+      - cidr: "{{ public_subnet_blocks.1.cidr }}"
+        az: "{{ vpc_subnet_azs.1 }}"
+        resource_tags: { "Name":"rhm-net-{{ rhmap['site'] }}-public" }
+      - cidr: "{{ public_subnet_blocks.2.cidr }}"
+        az: "{{ vpc_subnet_azs.2 }}"
+        resource_tags: { "Name":"rhm-net-{{ rhmap['site'] }}-public" }
+      - cidr: "{{ private_subnet_blocks.0.cidr }}"
+        az: "{{ vpc_subnet_azs.0 }}"
+        resource_tags: { "Name":"rhm-net-{{ rhmap['site'] }}-private" }
+      - cidr: "{{ private_subnet_blocks.1.cidr }}"
+        az: "{{ vpc_subnet_azs.1 }}"
+        resource_tags: { "Name":"rhm-net-{{ rhmap['site'] }}-private" }
+      - cidr: "{{ private_subnet_blocks.2.cidr }}"
+        az: "{{ vpc_subnet_azs.2 }}"
+        resource_tags: { "Name":"rhm-net-{{ rhmap['site'] }}-private" }
+    wait: yes
+  register: vpc
+  tags:
+    - grid
+
+- name: "Tagging AWS IGW for site {{ rhmap['site'] }}"
+  ec2_tag:
+    resource: "{{ vpc.igw_id }}"
+    region: "{{ rhmap['region'] }}"
+    state: present
+    tags:
+      Name: "rhm-igw-{{ rhmap['site'] | lower }}"
+      Grid: "{{ rhmap['grid'] }}"
+  tags:
+    - grid
+
+- name: "Querying AWS VPC for site {{ rhmap['site'] }}"
+  ec2_vpc_net_facts:
+    filters:
+      "tag:Name": "rhm-vpc-{{ rhmap['site'] | lower }}"
+    region: "{{ rhmap['region'] }}"
+  register: vpc
+  tags:
+    - rhmap
+
+- name: "Querying AWS VPC subnets for site {{ rhmap['site'] }}"
+  ec2_vpc_subnet_facts:
+    filters:
+      vpc-id: "{{ vpc.vpcs.0.id }}"
+      "tag:Name": "rhm-net-{{ rhmap['site'] }}-public"
+    region: "{{ rhmap['region'] }}"
+  register: sitesubnets
+  tags:
+    - rhmap
+
+#TODO: Determine domainname nomenclature
+#      Currently public_hosted_zone ie. rhmpoc.com
+#      Should probably be something like rhmap['grid'].mobile.redhat.com
+#      ie. tom.us.mobile.redhat.com
+#      ^Parse the variable to come up with this domainname
+#      ^Red Hat IT can give us a delegation from redhat.com
+#      ^mobile can be further delegated but that add dns latency.  We may not want that.
+#      ^Additional domains open us up to problems with Red Hat InfoSec and Legal
+#TODO: zone is deploying as a public zone.  This may be a bad thing and be
+#      exposing internal ip and hosts to the internet.  Investigate using a
+#      private zone
+- name: "Creating AWS Route53 zone for {{ rhmap['site'] }}"
+  route53_zone:
+    zone: "{{ public_hosted_zone }}"
+    state: present
+    comment: "{{ public_hosted_zone }}"
+  register: r53zone
+  tags:
+    - grid
+
+#TODO: Fix when statement
+- name: "Registering AWS com nameserver for site {{ rhmap['site'] }}"
+  shell: "lookup_plugins/r53_com_nameserver.py -d {{ r53zone.set.comment }}"
+  changed_when: False
+  register: comnameserver
+  #when: vpc.changed or r53zone.changed
+  tags: grid
+
+#NOTE: DO NOT change the order of these nameservers.
+#      The order is critical for OSCP etcd and master api service
+#      The only correct order is {{ comnameserver.stdout }},AmazonProvidedDNS
+#TODO: Fix hard coded ntpserver
+- name: "Creating AWS VPC DHCPOptions for site {{ rhmap['site'] }}"
+  ec2_vpc_dhcp_options:
+    domain_name: "{{ r53zone.set.comment }}"
+    region: "{{ rhmap['region'] }}"
+    dns_servers:
+        - "{{ comnameserver.stdout }}"
+        - AmazonProvidedDNS
+    ntp_servers:
+        - 1.2.3.4
+    vpc_id: "{{ vpc.vpc.id }}"
+    delete_old: True
+    inherit_existing: False
+  #when: vpc.changed or r53zone.changed
+  register: vpcdhcpopts
+  tags:
+    - grid
+
+- name: "Tagging the AWS VPC DHCPOptions for site {{ rhmap['site'] }}"
+  ec2_tag:
+    resource: "{{ vpcdhcpopts.dhcp_options_id }}"
+    region: "{{ rhmap['region'] }}"
+    state: present
+    tags:
+      Name: "rhm-vpcdhcpopts-{{ rhmap['site'] | lower }}"
+      Grid: "{{ rhmap['grid'] }}"
+  #when: vpc.changed or r53zone.changed
+  tags:
+    - grid
+
+- name: "Querying AWS VPCDHCPOptions for site {{ rhmap['site'] }}"
+  ec2_vpc_dhcp_options_facts:
+    region: "{{ rhmap['region'] }}"
+    DhcpOptionsIds: "{{ vpc.vpcs.0.dhcp_options_id }}"
+  register: vpcdhcpopts
+  tags:
+    - rhmap
+
+#TODO: Fix this task.  It should not run if vpc task doesn't run
+- name: "Creating AWS NAT gateways for site {{ rhmap['site'] }}"
+  ec2_vpc_nat_gateway:
+    if_exist_do_not_create: yes
+    state: present
+    subnet_id: "{{ item }}"
+    region: "{{ rhmap['region'] }}"
+    wait: yes
+  register: vpcnatgws
+  #when: vpc.changed
+  with_items:
+    - "{{ vpc.subnets.0.id }}"
+    - "{{ vpc.subnets.1.id }}"
+    - "{{ vpc.subnets.2.id }}"
+  tags:
+    - grid
+
+#TODO: Need python right here to query vpc cidr and subnets and determine the
+#      next block of 6 /26's for public/private subnets.  Could go here or up in
+#      aws-infrastructure/tasks/main.yaml vars section
+
+#TODO: Deploy additional public subnets to land public ELBs into
+#      I suggest small /28 subnets per ELB / Dyno endpoint.
+#TODO: cidr needs to consume output from facts in previous Task
+#TODO: Why is this Task changing at every run??
+#      See http://stackoverflow.com/questions/40368315/trouble-with-ec2-vpc-subnet-module
+- name: "Creating subnets for site for domain {{ domain }}"
+  ec2_vpc_subnet:
+    az: "{{ item.az }}"
+    cidr: "{{ item.cidr }}"
+    resource_tags:
+      Grid: "{{ rhmap['grid'] }}"
+      Name: "rhm-net-{{ domain | lower }}-{{ item.desig }}"
+      Site: "{{ rhmap['site'] }}"
+    region: "{{ rhmap['region'] }}"
+    state: present
+    vpc_id: "{{ vpc.vpcs.0.id }}"
+  with_items:
+    - cidr: "10.0.6.0/28"
+      az: "{{ vpc_subnet_azs.0 }}"
+      desig: "public"
+    - cidr: "10.0.6.64/28"
+      az: "{{ vpc_subnet_azs.1 }}"
+      desig: "public"
+    - cidr: "10.0.6.128/28"
+      az: "{{ vpc_subnet_azs.2 }}"
+      desig: "public"
+    - cidr: "10.0.7.0/28"
+      az: "{{ vpc_subnet_azs.0 }}"
+      desig: "private"
+    - cidr: "10.0.7.64/28"
+      az: "{{ vpc_subnet_azs.1 }}"
+      desig: "private"
+    - cidr: "10.0.7.128/28"
+      az: "{{ vpc_subnet_azs.2 }}"
+      desig: "private"
+  register: rhmapsubnets
+  tags:
+    - rhmap
+
+- name: "Creating AWS RouteTable for public subnets for site {{ rhmap['site'] }}"
+  ec2_vpc_route_table:
+    vpc_id: "{{ vpc.vpc_id }}"
+    region: "{{ rhmap['region'] }}"
+    tags:
+      Name: "rhm-rt-{{ rhmap['site'] | lower }}-public"
+    subnets:
+      - "{{ public_subnet_blocks.0.cidr }}"
+      - "{{ public_subnet_blocks.1.cidr }}"
+      - "{{ public_subnet_blocks.2.cidr }}"
+    routes:
+      - dest: 0.0.0.0/0
+        gateway_id: "{{ vpc.igw_id }}"
+  tags:
+    - grid
+
+- name: "Querying VPC for public subnets for domain {{ domain }}"
+  ec2_vpc_subnet_facts:
+    region: "{{ rhmap['region'] }}"
+    filters:
+      vpc-id: "{{ vpc.vpcs.0.id }}"
+      "tag:Name": "rhm-net-{{ domain | lower }}-public"
+  register: rhmapsubnets
+  tags:
+    - rhmap
+
+- name: "Querying VPC RouteTable for public routetable for domain {{ domain }}"
+  ec2_vpc_route_table_facts:
+    region: "{{ rhmap['region'] }}"
+    filters:
+      vpc-id: "{{ vpc.vpcs.0.id }}"
+      "tag:Name": "rhm-rt-{{ rhmap['site'] | lower }}-public"
+  register: vpcroutetables
+  tags:
+    - rhmap
+
+- name: "Querying AWS IGW for site {{ rhmap['site'] }}"
+  ec2_vpc_igw:
+    vpc_id: "{{ vpc.vpcs.0.id }}"
+    region: "{{ rhmap['region'] }}"
+    state: present
+  register: rhmapigw
+  tags:
+    - rhmap
+
+- name: "Creating AWS RouteTable for public subnets for domain {{ domain }}"
+  ec2_vpc_route_table:
+    vpc_id: "{{ vpc.vpcs.0.id }}"
+    region: "{{ rhmap['region'] }}"
+    tags:
+      Name: "rhm-rt-{{ domain | lower }}-public"
+    subnets:
+      - "{{ rhmapsubnets.subnets.0.cidr_block }}"
+      - "{{ rhmapsubnets.subnets.1.cidr_block }}"
+      - "{{ rhmapsubnets.subnets.2.cidr_block }}"
+    routes:
+      - dest: 0.0.0.0/0
+        gateway_id: "{{ rhmapigw.gateway_id }}"
+  tags:
+    - rhmap
+
+#TODO: Fix this task.  It should not run if vpc task doesn't run
+- name: "Creating AWS RouteTables for private subnets for site {{ rhmap['site'] }}"
+  ec2_vpc_route_table:
+    vpc_id: "{{ vpc.vpc_id }}"
+    region: "{{ rhmap['region'] }}"
+    tags:
+      Name: "rhm-rt-{{ rhmap['site'] | lower }}-nat-{{ item.Subnet.az }}"
+    subnets:
+      - "{{ item.Subnet.cidr }}"
+    routes:
+      - dest: 0.0.0.0/0
+        gateway_id: "{{ item.NatGW }}"
+  with_items:
+    - Subnet: "{{ vpc.subnets.3 }}"
+      NatGW: "{{ vpcnatgws.results.0.nat_gateway_id }}"
+    - Subnet: "{{ vpc.subnets.4 }}"
+      NatGW: "{{ vpcnatgws.results.1.nat_gateway_id }}"
+    - Subnet: "{{ vpc.subnets.5 }}"
+      NatGW: "{{ vpcnatgws.results.2.nat_gateway_id }}"
+  #when: vpc.changed
+  tags:
+    - grid
+
+- name: "Querying VPC for private subnet for domain {{ domain }}"
+  ec2_vpc_subnet_facts:
+    region: "{{ rhmap['region'] }}"
+    filters:
+      vpc-id: "{{ vpc.vpcs.0.id }}"
+      "tag:Name": "rhm-net-{{ domain | lower }}-private"
+  register: rhmapsubnets
+  tags:
+    - rhmap
+
+- debug: msg="{{ rhmapsubnets.subnets.0.availability_zone }}"
+  tags:
+    - rhmap
+
+- name: "Querying AWS NAT gateways for domain {{ domain }}"
+  ec2_vpc_nat_gateway:
+    if_exist_do_not_create: yes
+    state: present
+    subnet_id: "{{ item }}"
+    region: "{{ rhmap['region'] }}"
+    wait: yes
+  register: rhmapnatgws
+  with_items:
+    - "{{ sitesubnets.subnets.0.id }}"
+    - "{{ sitesubnets.subnets.1.id }}"
+    - "{{ sitesubnets.subnets.2.id }}"
+  tags:
+    - rhmap
+
+- debug: msg="{{ rhmapnatgws.results.0.nat_gateway_id }}"
+  tags:
+    - rhmap
+
+- name: "Creating AWS VPC RouteTables for private subnets for domain {{ domain }}"
+  ec2_vpc_route_table:
+    vpc_id: "{{ vpc.vpcs.0.id }}"
+    region: "{{ rhmap['region'] }}"
+    tags:
+      Name: "rhm-rt-{{ domain | lower }}-nat-{{ item.Subnet.availability_zone }}"
+    subnets:
+      - "{{ item.Subnet.cidr_block }}"
+    routes:
+      - dest: 0.0.0.0/0
+        gateway_id: "{{ item.NatGW }}"
+  with_items:
+    - Subnet: "{{ rhmapsubnets.subnets.0 }}"
+      NatGW: "{{ rhmapnatgws.results.0.nat_gateway_id }}"
+    - Subnet: "{{ rhmapsubnets.subnets.1 }}"
+      NatGW: "{{ rhmapnatgws.results.1.nat_gateway_id }}"
+    - Subnet: "{{ rhmapsubnets.subnets.2 }}"
+      NatGW: "{{ rhmapnatgws.results.2.nat_gateway_id }}"
+  #when: something
+  tags:
+    - rhmap
+
+#TODO: Remove error gate (name comment) when the above Networking Tasks scale correctly
+- name: Creating AWS SecurityGroup for site mgt
+  ec2_group:
+    name: "rhm-sg-{{ RRRrhmap['grid'] | lower }}-mgt"
+    description: "rhm-sg-{{ rhmap['grid'] | lower }}-mgt"
+    vpc_id: "{{ vpc.vpc.id }}"
+    region: "{{ region }}"
+    rules:
+      - proto: icmp
+        from_port: 8
+        to_port: -1
+        cidr_ip: 0.0.0.0/0
+      - proto: tcp
+        from_port: 22
+        to_port: 22
+        cidr_ip: 0.0.0.0/0
+      - proto: tcp
+        from_port: 22
+        to_port: 22
+        group_name: "rhm-sg-{{ rhmap['grid'] | lower }}-mgt"
+  register: mgtsg
+  retries: 2
+  tags:
+    - grid
+
+- name: Tag the security group
+  ec2_tag:
+    resource: "{{ mgtsg.group_id }}"
+    region: "{{ region }}"
+    state: present
+    tags:
+      Name: "rhm-sg-{{ rhmap['grid'] | lower }}-mgt"
+      Grid: "{{ rhmap['grid'] | lower }}"
+  tags:
+    - grid
+
+- name: Creating AWS SecurityGroup for OSCP Master service
+  ec2_group:
+    name: "rhm-sg-{{ rhmap['grid'] | lower }}-api"
+    description: "rhm-sg-{{ rhmap['grid'] | lower }}-api"
+    vpc_id: "{{ vpc.vpc.id }}"
+    region: "{{ region }}"
+    rules:
+      - proto: icmp
+        from_port: 8
+        to_port: -1
+        cidr_ip: 0.0.0.0/0
+      - proto: tcp
+        from_port: 80
+        to_port: 80
+        cidr_ip: 0.0.0.0/0
+      - proto: tcp
+        from_port: 443
+        to_port: 443
+        cidr_ip: 0.0.0.0/0
+      - proto: tcp
+        from_port: 2224
+        to_port: 2224
+        cidr_ip: 0.0.0.0/0
+      - proto: tcp
+        from_port: 4001
+        to_port: 4001
+        cidr_ip: 0.0.0.0/0
+      - proto: tcp
+        from_port: 8053
+        to_port: 8053
+        cidr_ip: 0.0.0.0/0
+      - proto: tcp
+        from_port: 8443
+        to_port: 8443
+        cidr_ip: 0.0.0.0/0
+      - proto: tcp
+        from_port: 8444
+        to_port: 8444
+        cidr_ip: 0.0.0.0/0
+      - proto: tcp
+        from_port: 9090
+        to_port: 9090
+        cidr_ip: 0.0.0.0/0
+      - proto: tcp
+        from_port: 3617
+        to_port: 3617
+        group_name: "rhm-sg-{{ rhmap['grid'] | lower }}-api"
+      - proto: tcp
+        from_port: 24224
+        to_port: 24224
+        group_name: "rhm-sg-{{ rhmap['grid'] | lower }}-api"
+      - proto: tcp
+        from_port: 20854
+        to_port: 20854
+        cidr_ip: 0.0.0.0/0
+      - proto: udp
+        from_port: 8053
+        to_port: 8053
+        cidr_ip: 0.0.0.0/0
+      - proto: udp
+        from_port: 5404
+        to_port: 5404
+        cidr_ip: 0.0.0.0/0
+      - proto: udp
+        from_port: 5405
+        to_port: 5405
+        cidr_ip: 0.0.0.0/0
+      - proto: udp
+        from_port: 24224
+        to_port: 24224
+        cidr_ip: 0.0.0.0/0
+  register: masterapisg
+  retries: 2
+  tags:
+    - grid
+
+- name: Tag the security group
+  ec2_tag:
+    resource: "{{ masterapisg.group_id }}"
+    region: "{{ region }}"
+    state: present
+    tags:
+      Name: "rhm-sg-{{ rhmap['grid'] | lower }}-api"
+      Grid: "{{ rhmap['grid'] }}"
+  tags:
+    - grid
+
+- name: Creating AWS SecurityGroup for OSCP Etcd service
+  ec2_group:
+    name: "rhm-sg-{{ rhmap['grid'] | lower }}-etcd"
+    description: "rhm-sg-{{ rhmap['grid'] | lower }}-etcd"
+    vpc_id: "{{ vpc.vpc.id }}"
+    region: "{{ region }}"
+    rules:
+      - proto: icmp
+        from_port: 8
+        to_port: -1
+        cidr_ip: 0.0.0.0/0
+      - proto: tcp
+        from_port: 2379
+        to_port: 2379
+        group_name: "rhm-sg-{{ rhmap['grid'] | lower }}-etcd"
+      - proto: tcp
+        from_port: 2380
+        to_port: 2380
+        group_name: "rhm-sg-{{ rhmap['grid'] | lower }}-etcd"
+  register: etcdsg
+  retries: 2
+  tags:
+    - grid
+
+- name: Tagging the security group
+  ec2_tag:
+    resource: "{{ etcdsg.group_id }}"
+    region: "{{ region }}"
+    state: present
+    tags:
+      Name: "rhm-sg-{{ rhmap['grid'] | lower }}-etcd"
+      Grid: "{{ rhmap['grid'] }}"
+  tags:
+    - grid
+
+#TODO: This cannot be built out per customer due to SG and rule limits
+- name: "Creating AWS SecurityGroup for OSCP Node service"
+  ec2_group:
+    name: "rhm-sg-{{ RRRrhmap['grid'] | lower }}-node"
+    description: "rhm-sg-{{ rhmap['grid'] | lower }}-node"
+    vpc_id: "{{ vpc.vpcs.0.id }}"
+    region: "{{ region }}"
+    rules:
+      - proto: tcp
+        from_port: 80
+        to_port: 80
+        cidr_ip: 0.0.0.0/0
+      - proto: tcp
+        from_port: 443
+        to_port: 443
+        cidr_ip: 0.0.0.0/0
+      - proto: tcp
+        from_port: 4789
+        to_port: 4789
+        group_name: "rhm-sg-{{ rhmap['grid'] | lower }}-node"
+      - proto: tcp
+        from_port: 10250
+        to_port: 10250
+        group_name: "rhm-sg-{{ rhmap['grid'] | lower }}-node"
+      - proto: tcp
+        from_port: 10255
+        to_port: 10255
+        group_name: "rhm-sg-{{ rhmap['grid'] | lower }}-node"
+      - proto: udp
+        from_port: 4789
+        to_port: 4789
+        group_name: "rhm-sg-{{ rhmap['grid'] | lower }}-node"
+      - proto: udp
+        from_port: 10255
+        to_port: 10255
+        group_name: "rhm-sg-{{ rhmap['grid'] | lower }}-node"
+  register: nodesg
+  tags:
+    - rhmap
+
+- name: Tagging the security group
+  no_log: True
+  ec2_tag:
+    resource: "{{ nodesg.group_id }}"
+    region: "{{ region }}"
+    state: present
+    tags:
+      Name: "rhm-sg-{{ rhmap['grid'] | lower }}-node"
+      Grid: "{{ rhmap['grid'] }}"
+  tags:
+    - rhmap
+
+#TODO: Anything node related need to move out of this play to a play that is
+#specific to deploying nodes.  Tagging may possibly be used to
+- name: Creating AWS SecurityGroup for OSCP Router service
+  ec2_group:
+    name: "rhm-sg-{{ rhmap['grid'] | lower }}-router"
+    description: "rhm-sg-{{ rhmap['grid'] | lower }}-router"
+    vpc_id: "{{ vpc.vpc.id }}"
+    region: "{{ region }}"
+    rules:
+      - proto: tcp
+        from_port: 80
+        to_port: 80
+        cidr_ip: 0.0.0.0/0
+      - proto: tcp
+        from_port: 443
+        to_port: 443
+        cidr_ip: 0.0.0.0/0
+      - proto: tcp
+        from_port: 8443
+        to_port: 8443
+        cidr_ip: 0.0.0.0/0
+      - proto: tcp
+        from_port: 80
+        to_port: 80
+        group_name: "rhm-sg-{{ rhmap['grid'] | lower }}-router"
+      - proto: tcp
+        from_port: 443
+        to_port: 443
+        group_name: "rhm-sg-{{ rhmap['grid'] | lower }}-router"
+      - proto: tcp
+        from_port: 8443
+        to_port: 8443
+        group_name: "rhm-sg-{{ rhmap['grid'] | lower }}-router"
+      - proto: tcp
+        from_port: 9000
+        to_port: 9000
+        group_name: "rhm-sg-{{ rhmap['grid'] | lower }}-router"
+  register: routersg
+  tags:
+    - rhmap
+
+- name: Tag the security group
+  ec2_tag:
+    resource: "{{ routersg.group_id }}"
+    region: "{{ region }}"
+    state: present
+    tags:
+      Name: "rhm-sg-{{ rhmap['grid'] | lower }}-router"
+      Grid: "{{ rhmap['grid'] }}"
+  tags:
+    - rhmap
+
+#TODO: Fix hard coded everything
+#TODO: Fix when statement
+- name: Creating rootCA key for Master api
+  shell: openssl genrsa -out /tmp/rootCA.key 4096
+  args:
+    executable: /bin/bash
+  register: openssl
+  when: vpc.changed or r53zone.changed
+  tags:
+    - grid
+
+- name: Creating rootCA crt for Master api
+  shell: openssl req -x509 -new -nodes -key /tmp/rootCA.key -sha256 -days 1024 \
+         -subj "/C=US/ST=NC/L=Raleigh/O=Red Hat, Inc./CN=*.{{ r53zone.set.comment }}" \
+         -out /tmp/rootCA.crt
+  args:
+    executable: /bin/bash
+  register: openssl
+  when: vpc.changed or r53zone.changed
+  tags:
+    - grid
+
+- name: Creating self-signed key for Master api
+  shell: openssl genrsa -out /tmp/us-tom-rhmpoc.com.key 2048
+  args:
+    executable: /bin/bash
+  register: openssl
+  when: vpc.changed or r53zone.changed
+  tags:
+    - grid
+
+- name: Creating self-signed csr for Master api
+  shell: openssl req -new \
+         -subj "/C=US/ST=NC/L=Raleigh/O=Red Hat, Inc./CN=*.{{ r53zone.set.comment }}" \
+         -extensions SAN \
+         -config <( cat /System/Library/OpenSSL/openssl.cnf <(printf "[SAN]\nsubjectAltName='DNS.1:*.{{ r53zone.set.comment }},DNS.2:,DNS.3:'")) \
+         -key "/tmp/us-tom-{{ r53zone.set.comment }}.key -out /tmp/us-tom-{{ r53zone.set.comment }}.csr"
+  args:
+    executable: /bin/bash
+  register: openssl
+  when: vpc.changed or r53zone.changed
+  tags:
+    - grid
+
+- name: Creating self-signed crt for Master api
+  shell: openssl x509 -days 1024 -sha256 -req \
+         -CA /tmp/rootCA.crt -CAkey /tmp/rootCA.key -CAcreateserial \
+         -in "/tmp/us-tom-{{ r53zone.set.comment }}.csr" \
+         -out "/tmp/us-tom-{{ r53zone.set.comment }}.crt"
+  args:
+    executable: /bin/bash
+  register: openssl
+  when: vpc.changed or r53zone.changed
+  tags:
+    - grid
+
+#TODO: Need certs uploaded to AWS/ACM
+
+#TODO: Fix hard coded file, key, cert name
+- name: Ensuring AWS IAM ssl key/certs does not exist
+  iam_cert:
+    aws_access_key: <CHANGEME>
+    aws_secret_key: <CHANGEME>
+    name: "{{ rhmap['grid'] | lower }}-wildcard.{{ r53zone.set.comment }}"
+    state: absent
+    region: us-east-1
+  when: vpc.changed or r53zone.changed
+  tags:
+    - grid
+
+#TODO: Fix hard coded file, key, cert name
+- name: Creating AWS IAM ssl key/certs for rhmpoc.com
+  iam_cert:
+    aws_access_key: <CHANGEME>
+    aws_secret_key: <CHANGEME>
+    name: "{{ rhmap['grid'] | lower }}-wildcard.{{ r53zone.set.comment }}"
+    state: present
+    cert: "/tmp/{{ rhmap['grid'] | lower }}-{{ r53zone.set.comment }}.crt"
+    key: "/tmp/{{ rhmap['grid'] | lower }}-{{ r53zone.set.comment }}.key"
+    region: us-east-1
+  when: vpc.changed or r53zone.changed
+  tags:
+    - grid
+
+- name: Creating AWS IAM role for Mgt instance
+  iam:
+    iam_type: role
+    name: oscpmgt
+    state: present
+  tags:
+    - grid
+
+- name: Creating AWS IAM policy for Mgt instance
+  iam_policy:
+    iam_type: role
+    iam_name: oscpmgt
+    policy_name: oscpmgt
+    policy_document: roles/aws-infrastructure/files/oscpmgt.json
+    profile: arn:aws:iam:::instance-profile/oscpmgt
+    state: present
+  tags:
+    - grid
+
+- name: Creating AWS IAM role for Infra instance
+  iam:
+    iam_type: role
+    name: oscpinfra
+    state: present
+  tags:
+    - grid
+
+- name: Creating AWS IAM policy for Infra instance
+  iam_policy:
+    iam_type: role
+    iam_name: oscpinfra
+    policy_name: oscpinfra
+    policy_document: roles/aws-infrastructure/files/oscpinfra.json
+    profile: arn:aws:iam:::instance-profile/oscpinfra
+    state: present
+  tags:
+    - grid
+
+- name: Creating AWS IAM role for Master instance
+  iam:
+    iam_type: role
+    name: oscpmaster
+    state: present
+  tags:
+    - grid
+
+- name: Creating AWS IAM policy for Master instance
+  iam_policy:
+    iam_type: role
+    iam_name: oscpmaster
+    policy_name: oscpmaster
+    policy_document: roles/aws-infrastructure/files/oscpmaster.json
+    profile: arn:aws:iam:::instance-profile/oscpmaster
+    state: present
+  tags:
+    - grid
+
+- name: Creating AWS IAM role for Node instance
+  iam:
+    iam_type: role
+    name: oscpnode
+    state: present
+  tags:
+    - rhmap
+
+- name: Creating AWS IAM policy for Node instance
+  iam_policy:
+    iam_name: oscpnode
+    iam_type: role
+    policy_name: oscpnode
+    policy_document: roles/aws-infrastructure/files/oscpnode.json
+    profile: arn:aws:iam:::instance-profile/oscpnode
+    state: present
+  tags:
+    - rhmap
+
+- name: Creating AWS IAM user for AWS S3 OSCP Docker Registry bucket
+  iam:
+    iam_type: user
+    name: "s3user{{ rhmap['grid'] }}"
+    state: present
+    access_key_state: create
+  register: s3user
+  tags:
+    - grid
+
+#- debug: msg="{{ s3user.msg.user_name }}"
+
+#TODO: Policy isn't landing.  Figure is out homeslice!
+#TODO: Policy needs to be tightened up to specific bucket
+- name: Creating AWS IAM policy for AWS S3 OSCP Docker Registry bucket
+  iam_policy:
+    iam_name: "s3user{{ rhmap['grid'] }}"
+    iam_type: role
+    policy_name: AmazonS3FullAccess
+#    policy_json: '{"Version":"2012-10-17","Statement":[{"Action":["s3:*"],"Effect":"Allow","Resource":"*"}]}'
+    state: present
+#  when: s3user.changed
+  tags:
+    - grid
+
+#TODO: AWS EC2 instantiation should come from fh-aws-environment-sizes.json
+#      Be thinking about how to achieve this
+#TODO: ssh keys need to be called {{ r53zone.set.comment }}-Key
+#      Please update all var files and EC2s
+- name: "Creating AWS EC2 Mgt instance for {{ rhmap['grid'] }}"
+  ec2:
+    assign_public_ip: no
+    count_tag:
+      Name: "{{ rhmap['grid'] | replace('-', '') | lower }}mgt.{{ r53zone.set.comment }}"
+    exact_count: 1
+    group: [ "rhm-sg-{{ rhmap['grid'] | lower }}-mgt" ]
+    instance_profile_name: oscpmgt
+    instance_type: "{{ mgt_instance_type }}"
+    image: "{{ ami }}"
+    instance_tags:
+      Name: "{{ rhmap['grid'] | replace('-', '') | lower }}mgt.{{ r53zone.set.comment }}"
+    key_name: "{{ keypair }}"
+    monitoring: no
+    region: "{{ region }}"
+    termination_protection: no
+    user_data: "{{ lookup('file', playbook_dir + '/roles/aws-infrastructure/files/user_data') }}"
+    volumes:
+      - device_name: /dev/sda1
+        device_type: gp2
+        volume_size: 30
+        delete_on_termination: true
+    vpc_subnet_id: "{{ vpc.subnets.0.id }}"
+    wait: yes
+  register: oscpmgt
+  tags:
+    - grid
+
+- name: "Tagging AWS EC2 Mgt instance for {{ rhmap['grid'] }}"
+  no_log: True
+  ec2_tag:
+    resource: "{{ oscpmgt.tagged_instances.0.id }}"
+    region: "{{ region }}"
+    state: present
+    tags:
+      Name: "{{ rhmap['grid'] | replace('-', '') | lower }}mgt.{{ r53zone.set.comment }}"
+      Role: "OSCPMgt"
+      Grid: "{{ rhmap['grid'] }}"
+      Phase: "POC"
+  tags:
+    - grid
+
+#TODO: Do our mgmt instances really need additional EBS storage??
+#- name: Creating AWS EBS instance for Mgt EC2
+#  no_log: True
+#  ec2_vol:
+#    instance: "{{ oscpmgt.tagged_instances.0.id }}"
+#    delete_on_termination: yes
+#    name: OSCPMgtVol
+#    device_name: /dev/xvdb
+#    region: "{{ region }}"
+#    volume_size: 10
+#    volume_type: gp2
+#  tags:
+#    - grid
+
+- name: Creating AWS EIP instance for Mgt EC2
+  ec2_eip:
+    device_id: "{{ oscpmgt.tagged_instances.0.id }}"
+    in_vpc: yes
+    region: "{{ region }}"
+    state: present
+  retries: 3
+  register: oscpmgteip
+  tags:
+    - grid
+
+- name: "Creating AWS EC2 OSCP master instances for {{ rhmap['grid'] }}"
+  ec2:
+    assign_public_ip: no
+    count_tag:
+      Name: "{{ item.Name }}"
+    exact_count: 1
+    group: [
+      "rhm-sg-{{ rhmap['grid'] | lower }}-etcd",
+      "rhm-sg-{{ rhmap['grid'] | lower }}-api",
+      "rhm-sg-{{ rhmap['grid'] | lower }}-mgt"
+    ]
+    instance_profile_name: oscpmaster
+    instance_type: "{{ master_instance_type }}"
+    image: "{{ ami }}"
+    instance_tags:
+      Name: "{{ item.Name }}"
+    key_name: "{{ keypair }}"
+    monitoring: no
+    region: "{{ region }}"
+    termination_protection: no
+    user_data: "{{ lookup('file', playbook_dir + '/roles/aws-infrastructure/files/user_data') }}"
+    volumes:
+      - device_name: /dev/sda1
+        device_type: gp2
+        volume_size: 30
+        delete_on_termination: true
+    vpc_subnet_id: "{{ item.Subnet }}"
+    wait: yes
+  with_items:
+    - Name: "master1.{{ r53zone.set.comment }}"
+      Subnet: "{{ vpc.subnets.3.id }}"
+    - Name: "master2.{{ r53zone.set.comment }}"
+      Subnet: "{{ vpc.subnets.4.id }}"
+    - Name: "master3.{{ r53zone.set.comment }}"
+      Subnet: "{{ vpc.subnets.5.id }}"
+  register: masters
+  tags:
+    - grid
+
+- name: "Tagging AWS EC2 OSCP master instances for {{ rhmap['grid'] }}"
+  no_log: True
+  ec2_tag:
+    resource: "{{ item.tagged_instances.0.id }}"
+    region: "{{ region }}"
+    state: present
+    tags:
+      Grid: "{{ rhmap['grid'] }}"
+      Phase: "POC"
+      Role: "oscpmaster"
+      ServiceName: "OSCP"
+  with_items:
+    - "{{ masters.results }}"
+  tags:
+    - grid
+
+- name: "Creating AWS EBS volumes OSCP master instances for {{ rhmap['grid'] }}"
+  no_log: True
+  ec2_vol:
+    instance: "{{ item.tagged_instances.0.id }}"
+    delete_on_termination: yes
+    name: "rhm-ebs-{{ rhmap['grid'] | lower }}-{{ item.tagged_instances.0.id }}~data"
+    device_name: /dev/xvdb
+    region: "{{ region }}"
+    volume_size: 10
+    volume_type: gp2
+  with_items:
+    - "{{ masters.results }}"
+  tags:
+    - grid
+
+#TODO: Node instances need to land in app specific subnets
+- name: "Creating AWS EC2 OSCP Node instances for {{ grid }}"
+  ec2:
+    count_tag:
+      Name: "{{ item.Name }}"
+    exact_count: 1
+    group: [
+      "rhm-sg-{{ rhmap['grid'] | lower }}-etcd",
+      "rhm-sg-{{ rhmap['grid'] | lower }}-mgt",
+      "rhm-sg-{{ rhmap['grid'] | lower }}-node"
+    ]
+    instance_profile_name: oscpnode
+    instance_type: "{{ node_instance_type }}"
+    image: "{{ ami }}"
+    instance_tags:
+      Name: "{{ item.Name }}"
+      ServiceName: "OSCP"
+      Role: "oscpnode"
+      Grid: "{{ rhmap['grid'] }}"
+      Phase: "POC"
+    key_name: "{{ keypair }}"
+    monitoring: no
+    region: "{{ region }}"
+    termination_protection: no
+    user_data: "{{ lookup('file', playbook_dir + '/roles/aws-infrastructure/files/user_data') }}"
+    volumes:
+      - device_name: /dev/sda1
+        device_type: gp2
+        volume_size: 30
+        delete_on_termination: true
+    vpc_subnet_id: "{{ item.Subnet }}"
+    wait: yes
+  with_items:
+    - Name: "rhm-oscp-{{ grid | replace('-', '' ) }}-node1.{{ r53zone.set.comment }}"
+      Subnet: "{{ vpc.subnets.3.id }}"
+    - Name: "rhm-oscp-{{ grid | replace('-', '' ) }}-node2.{{ r53zone.set.comment }}"
+      Subnet: "{{ vpc.subnets.4.id }}"
+    - Name: "rhm-oscp-{{ grid | replace('-', '' ) }}-node3.{{ r53zone.set.comment }}"
+      Subnet: "{{ vpc.subnets.5.id }}"
+  register: rhmapnodes
+  tags:
+    - rhmap
+
+- name: "Tagging AWS EC2 OSCP node instances for {{ rhmap['grid'] }} / domain {{ grid }}"
+  no_log: True
+  ec2_tag:
+    resource: "{{ item.tagged_instances.0.id }}"
+    region: "{{ region }}"
+    state: present
+    tags:
+      ServiceName: "OSCP"
+      Role: "oscpnode"
+      Grid: "{{ rhmap['grid'] }}"
+      Phase: "POC"
+  with_items:
+    - "{{ rhmapnodes.results }}"
+  tags:
+    - rhmap
+
+- name: "Creating AWS EBS volumes for Node instances for {{ grid }}"
+  no_log: True
+  ec2_vol:
+    instance: "{{ item.tagged_instances.0.id }}"
+    delete_on_termination: yes
+    name: "rhm-ebs-{{ item.tagged_instances.0.id }}"
+    device_name: /dev/xvdb
+    region: "{{ region }}"
+    volume_size: 10
+    volume_type: gp2
+  with_items:
+    - "{{ rhmapnodes.results }}"
+  tags:
+    - rhmap
+
+- name: "Creating AWS EC2 OSCP Router instances for {{ rhmap['grid'] }} / domain {{ grid }}"
+  ec2:
+    assign_public_ip: no
+    count_tag:
+      Name: "{{ item.Name }}"
+    exact_count: 1
+    group: ["{{ rhmap['grid'] }}MgtSg",'OSCPEtcdSg','OSCPRouterSg']
+    instance_type: "{{ infra_instance_type }}"
+    instance_profile_name: oscpinfra
+    image: "{{ ami }}"
+    instance_tags:
+      Name: "{{ item.Name }}"
+    key_name: "{{ keypair }}"
+    monitoring: no
+    region: "{{ region }}"
+    termination_protection: no
+    user_data: "{{ lookup('file', playbook_dir + '/roles/aws-infrastructure/files/user_data') }}"
+    volumes:
+      - device_name: /dev/sda1
+        device_type: gp2
+        volume_size: 30
+        delete_on_termination: true
+    vpc_subnet_id: "{{ item.Subnet }}"
+    wait: yes
+  register: rhmaprouters
+  with_items:
+    - Name: "rhm-oscp-{{ grid | replace('-', '') }}-router1.{{ r53zone.set.comment }}"
+      Subnet: "{{ vpc.subnets.3.id }}"
+    - Name: "rhm-oscp-{{ grid | replace('-', '') }}-router2.{{ r53zone.set.comment }}"
+      Subnet: "{{ vpc.subnets.4.id }}"
+  tags:
+    - rhmap
+
+
+- name: "Creating AWS EBS volumes for Router instances for domain {{ grid }}"
+  no_log: True
+  ec2_vol:
+    instance: "{{ item.tagged_instances.0.id }}"
+    delete_on_termination: yes
+    name: "rhm-ebs-{{ item.tagged_instances.0.id }}"
+    device_name: /dev/xvdb
+    region: "{{ region }}"
+    volume_size: 10
+    volume_type: gp2
+  with_items:
+    - "{{ rhmaprouters.results }}"
+  tags:
+    - rhmap
+
+- name: "Tagging AWS EC2 OSCP Router instances for domain {{ grid }}"
+  no_log: True
+  ec2_tag:
+    resource: "{{ item.tagged_instances.0.id }}"
+    region: "{{ region }}"
+    state: present
+    tags:
+      ServiceName: "OSCP"
+      Role: "oscprouter"
+      Grid: "{{ rhmap['grid'] }}"
+      Phase: "POC"
+  with_items:
+    - "{{ rhmaprouters.results }}"
+  tags:
+    - rhmap
+
+#TODO: Need better AWS certificate management
+- name: "Creating AWS ELB for internal OSCP Master api endpoint for {{ rhmap['grid'] }}"
+  ec2_elb_lb:
+    cross_az_load_balancing: "yes"
+    health_check:
+      ping_protocol: https
+      ping_port: 8443
+      ping_path: "/api"
+      response_timeout: 2
+      interval: 5
+      unhealthy_threshold: 2
+      healthy_threshold: 3
+    listeners:
+      - protocol: https
+        load_balancer_port: 443
+        instance_protocol: https
+        instance_port: 8443
+        ssl_certificate_id: "arn:aws:iam::840121666178:server-certificate/{{ rhmap['grid'] | lower }}-wildcard.{{ r53zone.set.comment }}"
+      - protocol: https
+        load_balancer_port: 8443
+        instance_protocol: https
+        instance_port: 8443
+        ssl_certificate_id: "arn:aws:iam::840121666178:server-certificate/{{ rhmap['grid'] | lower }}-wildcard.{{ r53zone.set.comment }}"
+    name: "rhm-elb-{{ rhmap['grid'] | lower | replace('-', '') }}-masterapiint"
+    region: "{{ region }}"
+    scheme: internal
+    security_group_ids: "{{ masterapisg.group_id }}"
+    state: present
+    subnets:
+      - "{{ vpc.subnets.3.id }}"
+      - "{{ vpc.subnets.4.id }}"
+      - "{{ vpc.subnets.5.id }}"
+    tags:
+      Name: "rhm-elb-{{ rhmap['grid'] | lower | replace('-', '') }}-masterapiint"
+      Grid: "{{ rhmap['grid'] }}"
+      Phase: "POC"
+  register: masterapiinternal
+  tags:
+    - grid
+
+#TODO: Need better AWS certificate management
+- name: "Creating AWS ELB for internet OSCP Master api endpoint for {{ rhmap['grid'] }}"
+  ec2_elb_lb:
+    cross_az_load_balancing: "yes"
+    health_check:
+      ping_protocol: https
+      ping_port: 8443
+      ping_path: "/api"
+      response_timeout: 2
+      interval: 5
+      unhealthy_threshold: 2
+      healthy_threshold: 3
+    listeners:
+      - protocol: https
+        load_balancer_port: 443
+        instance_protocol: https
+        instance_port: 8443
+        ssl_certificate_id: "arn:aws:iam::840121666178:server-certificate/{{ rhmap['grid'] | lower }}-wildcard.{{ r53zone.set.comment }}"
+      - protocol: https
+        load_balancer_port: 8443
+        instance_protocol: https
+        instance_port: 8443
+        ssl_certificate_id: "arn:aws:iam::840121666178:server-certificate/{{ rhmap['grid'] | lower }}-wildcard.{{ r53zone.set.comment }}"
+    name: "rhm-elb-{{ rhmap['grid'] | lower | replace('-', '') }}-masterapiext"
+    region: "{{ region }}"
+    scheme: internet-facing
+    security_group_ids: "{{ masterapisg.group_id }}"
+    state: present
+    subnets:
+      - "{{ vpc.subnets.1.id }}"
+      - "{{ vpc.subnets.2.id }}"
+      - "{{ vpc.subnets.3.id }}"
+    tags:
+      Name: "rhm-elb-{{ rhmap['grid'] | lower | replace('-', '') }}-masterapiext"
+      Grid: "{{ rhmap['grid'] }}"
+      Phase: "POC"
+  register: masterapiinternet
+  tags:
+    - grid
+
+#TODO: Need better AWS certificate management
+- name: "Creating AWS ELB endpoint for grid {{ rhmap['grid'] }} / domain {{ grid }} router endpoint"
+  ec2_elb_lb:
+    cross_az_load_balancing: "yes"
+    health_check:
+      ping_protocol: tcp
+      ping_port: 443
+      response_timeout: 2
+      interval: 5
+      unhealthy_threshold: 2
+      healthy_threshold: 2
+    listeners:
+      - protocol: tcp
+        load_balancer_port: 80
+        instance_protocol: tcp
+        instance_port: 80
+      - protocol: tcp
+        load_balancer_port: 443
+        instance_protocol: tcp
+        instance_port: 443
+      - protocol: tcp
+        load_balancer_port: 3617
+        instance_protocol: tcp
+        instance_port: 3617
+    name: "rhm-elb-{{ grid | lower | replace('-', '') }}-router"
+    region: "{{ region }}"
+    scheme: internal
+    security_group_ids: "{{ routersg.group_id }}"
+    state: present
+    subnets:
+      - "{{ vpc.subnets.1.id }}"
+      - "{{ vpc.subnets.2.id }}"
+      - "{{ vpc.subnets.3.id }}"
+    tags:
+      Name: "rhm-elb-{{ grid | lower | replace('-', '') }}-router"
+      Grid: "{{ rhmap['grid'] }}"
+      Phase: "POC"
+  register: rhmaprouterendpt
+  tags:
+    - rhmap
+
+- name: "Creating AWS ELB endpoint for grid {{ rhmap['grid'] }} / domain {{ grid }}"
+  ec2_elb_lb:
+    cross_az_load_balancing: "yes"
+    health_check:
+      ping_protocol: tcp
+      ping_port: 443
+      response_timeout: 2
+      interval: 5
+      unhealthy_threshold: 2
+      healthy_threshold: 2
+    listeners:
+      - protocol: tcp
+        load_balancer_port: 80
+        instance_protocol: tcp
+        instance_port: 80
+      - protocol: tcp
+        load_balancer_port: 443
+        instance_protocol: tcp
+        instance_port: 443
+    name: "rhm-elb-{{ grid | lower | replace('-', '') }}"
+    region: "{{ region }}"
+    scheme: internet-facing
+    security_group_ids: "{{ routersg.group_id }}"
+    state: present
+    subnets:
+      - "{{ vpc.subnets.1.id }}"
+      - "{{ vpc.subnets.2.id }}"
+      - "{{ vpc.subnets.3.id }}"
+    tags:
+      Name: "rhm-elb-{{ grid | lower | replace('-', '') }}"
+      Grid: "{{ rhmap['grid'] }}"
+      Phase: "POC"
+  register: rhmapendpt
+  tags:
+    - rhmap
+
+- name: "Registering OSCP master EC2 instances to masterapiint ELB for {{ grid }}"
+  ignore_errors: yes
+  no_log: True
+  ec2_elb:
+    instance_id: "{{ item.tagged_instances.0.id }}"
+    ec2_elbs: "{{ masterapiinternal.elb.name }}"
+    region: "{{ region }}"
+    state: present
+  with_items:
+    - "{{ masters.results }}"
+  register: test
+  failed_when: "'InvalidInstanceID.NotFound' in test"
+  tags:
+    - grid
+
+- name: "Registering OSCP master EC2 instances to masterapiext ELB for {{ grid }}"
+  ignore_errors: yes
+  no_log: True
+  ec2_elb:
+    instance_id: "{{ item.tagged_instances.0.id }}"
+    ec2_elbs: "{{ masterapiinternet.elb.name }}"
+    region: "{{ region }}"
+    state: present
+  with_items:
+    - "{{ masters.results }}"
+  register: test
+  failed_when: "'InvalidInstanceID.NotFound' in test"
+  tags:
+    - grid
+
+- name: "Registering {{ grid }} EC2 instances to {{ grid }} ELB Node instance"
+  ignore_errors: yes
+  no_log: True
+  ec2_elb:
+    instance_id: "{{ item.tagged_instances.0.id }}"
+    ec2_elbs: "{{ rhmapendpt.elb.name }}"
+    region: "{{ region }}"
+    state: present
+  with_items:
+    - "{{ rhmapnodes.results }}"
+  register: regrhmapnodes
+  failed_when: "'InvalidInstanceID.NotFound' in regrhmapnodes"
+  tags:
+    - rhmap
+
+- name: "Registering {{ grid }} EC2 instances to {{ grid }} ELB Router instance"
+  ignore_errors: yes
+  no_log: True
+  ec2_elb:
+    instance_id: "{{ item.tagged_instances.0.id }}"
+    ec2_elbs: "{{ rhmaprouterendpt.elb.name }}"
+    region: "{{ region }}"
+    state: present
+  with_items:
+    - "{{ rhmaprouters.results }}"
+  register: regrhmaprouters
+  failed_when: "'InvalidInstanceID.NotFound' in regrhmaprouters"
+  tags:
+    - rhmap
+
+- name: "Creating AWS Route53 A records for EC2 instances in zone {{ r53zone.set.comment }}"
+  no_log: True
+  route53:
+    command: create
+    overwrite: yes
+    record: "{{ item.tagged_instances.0.private_dns_name | replace('ec2.internal', r53zone.set.comment ) }}"
+    type: A
+    ttl: 300
+    value: "{{ item.tagged_instances.0.private_ip }}"
+    zone: "{{ r53zone.set.comment }}"
+  with_items:
+    - "{{ oscpmgt }}"
+    - "{{ masters.results }}"
+  tags:
+    - grid
+
+- name: "Creating AWS Route53 friendly A records for EC2 instances in zone {{ r53zone.set.comment }}"
+  no_log: True
+  route53:
+    command: create
+    overwrite: yes
+    record: "{{ item.tagged_instances.0.tags.Name }}"
+    type: A
+    ttl: 300
+    value: "{{ item.tagged_instances.0.private_ip }}"
+    zone: "{{ r53zone.set.comment }}"
+  with_items:
+    - "{{ oscpmgt }}"
+    - "{{ masters.results }}"
+  tags:
+    - grid
+
+- name: "Creating AWS Route53 A records for {{ grid }} EC2 instances in zone {{ r53zone.set.comment }}"
+  no_log: True
+  route53:
+    command: create
+    overwrite: yes
+    record: "{{ item.tagged_instances.0.private_dns_name | replace('ec2.internal', r53zone.set.comment ) }}"
+    type: A
+    ttl: 300
+    value: "{{ item.tagged_instances.0.private_ip }}"
+    zone: "{{ r53zone.set.comment }}"
+  with_items:
+    - "{{ rhmapnodes.results }}"
+    - "{{ rhmaprouters.results }}"
+  tags:
+    - rhmap
+
+- name: "Creating AWS Route53 friendly A records for {{ grid }} EC2 instances in zone {{ r53zone.set.comment }}"
+  no_log: True
+  route53:
+    command: create
+    overwrite: yes
+    record: "{{ item.tagged_instances.0.tags.Name }}"
+    type: A
+    ttl: 300
+    value: "{{ item.tagged_instances.0.private_ip }}"
+    zone: "{{ r53zone.set.comment }}"
+  with_items:
+    - "{{ rhmapnodes.results | replace('-', '') }}"
+    - "{{ rhmaprouters.results | replace('-', '') }}"
+  tags:
+    - rhmap
+
+- name: "Creating AWS Route53 CNAME records for ELB endpoints for master api's in zone {{ r53zone.set.comment }}"
+  no_log: True
+  route53:
+    command: create
+    overwrite: yes
+    record: "{{ item.elb.name }}.{{ r53zone.set.comment }}"
+    type: CNAME
+    ttl: 300
+    value: "{{ item.elb.dns_name }}"
+    zone: "{{ r53zone.set.comment }}"
+  with_items:
+    - "{{ masterapiinternal }}"
+    - "{{ masterapiinternet }}"
+  tags:
+    - grid
+
+- name: "Creating AWS Route53 CNAME records for ELB endpoints for {{ grid }} in zone {{ r53zone.set.comment }}"
+  no_log: True
+  route53:
+    command: create
+    overwrite: yes
+    record: "{{ item.elb.name }}.{{ r53zone.set.comment }}"
+    type: CNAME
+    ttl: 300
+    value: "{{ item.elb.dns_name }}"
+    zone: "{{ r53zone.set.comment }}"
+  with_items:
+    - "{{ rhmapendpt }}"
+  tags:
+    - rhmap
+
+- name: "Creating AWS Route53 CNAME records for ELB endpoints for {{ grid }} router in zone {{ r53zone.set.comment }}"
+  no_log: True
+  route53:
+    command: create
+    overwrite: yes
+    record: "{{ item.elb.name }}.{{ r53zone.set.comment }}"
+    type: CNAME
+    ttl: 300
+    value: "{{ item.elb.dns_name | replace('-', '') }}"
+    zone: "{{ r53zone.set.comment }}"
+  with_items:
+    - "{{ rhmaprouterendpt }}"
+  tags:
+    - rhmap
+
+# TODO : Ensure bucket policy is getting landed
+- name: Creating AWS S3 bucket for OSCP Docker Registry
+  s3_bucket:
+    name: "{{ rhmap['grid'] | lower }}"
+    state: present
+    policy: "{{ lookup('file', playbook_dir + '/roles/aws-infrastructure/files/S3FullAccess.json') }}"
+    tags:
+      ServiceName: "OSCP"
+      Grid: "{{ rhmap['grid'] }}"
+  tags:
+    - grid
+
+#TODO: Output ssh configuration for this grid
+#      Be aware of lack of support for human readable output
+#      I really want straight up copy/paste commands
+#      Icing on the cake would be to make Ansible control the ssh config file then profit++
+- name: Ssh client configuration
+  debug:
+    msg: "{{ oscpmgteip.public_ip }} : Add this to ~/.ssh/config "
+  tags:
+    - grid

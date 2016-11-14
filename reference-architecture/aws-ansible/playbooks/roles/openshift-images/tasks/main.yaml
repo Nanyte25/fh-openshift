@@ -1,0 +1,16 @@
+---
+
+- name: Verify OSCP images
+  no_log: True
+  ignore_errors: yes
+  shell: "/bin/docker images | grep {{ item }}"
+  with_items: "{{ preload_images }}"
+  register: dockerimages
+  changed_when: "'ose' in dockerimages.stderr"
+
+- name: Docker pull OSCP images
+  command: "docker pull {{ item }}"
+  with_items: "{{ preload_images }}"
+  when:
+    - deployment_type == "openshift-enterprise"
+    - dockerimages | failed

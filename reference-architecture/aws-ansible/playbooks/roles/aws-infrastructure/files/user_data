@@ -1,0 +1,85 @@
+#!/bin/bash
+
+exec >> /root/install_log 2>&1
+set -x
+
+echo; echo "### Ensure failed RHSM endpoint is removed"
+sed -i s/rhui2-cds01.us-east-1.aws.ce.redhat.com//g /etc/yum.repos.d/rhui-load-balancers.conf
+
+echo; echo "### Ensure resolver is setup correctly"
+echo 'options timeout:3 attempts:1 rotate' >> /etc/resolv.conf
+
+echo; echo "### Ensure that time is set correctly"
+ntpdate -s 0.rhel.pool.ntp.org
+
+echo; echo "### Ensure that git rpm is installed"
+yum install -y git
+
+echo; echo "### Ensure that pip is installed correctly"
+easy_install pip
+
+echo; echo "### Ensure that AWS python bindings in installed"
+cd /root
+git clone https://github.com/boto/boto.git
+cd boto
+python setup.py install > /dev/null 2>&1
+rm -rf boto
+cd /root
+
+echo; echo "### FETCH CURRENT METADATA"
+curl http://169.254.169.254/latest/dynamic/instance-identity/document -o document
+curl http://169.254.169.254/latest/user-data -o user-data
+
+echo; echo "### UPDATE HOSTNAME"
+AWS_INSTANCE_ID=`curl -s http://169.254.169.254/latest/meta-data/instance-id`
+echo $AWS_INSTANCE_ID > /root/.aws_instance_id
+AWS_REGION=`curl -s http://169.254.169.254/latest/dynamic/instance-identity/document/ | grep region | cut -d"\"" -f 4`
+echo $AWS_REGION > /root/.region
+AWS_VPC_ID=`python -c "from boto import ec2; print ec2.connect_to_region('$AWS_REGION').get_all_instances(instance_ids='$AWS_INSTANCE_ID')[0].instances[0].vpc_id"`
+echo $AWS_VPC_ID > /root/.aws_vpc
+AWS_AREA=`python -c "import boto.vpc; conn=boto.vpc.connect_to_region('$AWS_REGION'); print [ str(x.tags['Name']).lower() for x in conn.get_all_vpcs() if x.id == '$AWS_VPC_ID' ][0]"`
+EC2_NAME=`python -c "from boto import ec2; print ec2.connect_to_region('$AWS_REGION').get_all_tags(filters={'resource-id': '$AWS_INSTANCE_ID', 'key': 'Name'})[0].value.lower();"`
+HOSTNAME=$(echo ${EC2_NAME} | awk -F'.' {'print $1'})
+IPADDRESS="$(ip addr show eth0 | grep "inet " | awk {'print $2'} | awk -F'/' {'print $1'})"
+
+# THIS IS UNNECCESSARY SINCE WE ARE DOING ROUTE53
+#echo; echo "### Set dhclient for option 81"
+#echo "send fqdn.fqdn = \"$HOSTNAME.$DOMAIN.\";" > /etc/dhcp/dhclient.conf
+#echo "send fqdn.encoded on;" >> /etc/dhcp/dhclient.conf
+#echo "send fqdn.server-update off;" >> /etc/dhcp/dhclient.conf
+#echo "also request fqdn;" >> /etc/dhcp/dhclient.conf
+
+if `grep -q -i "release 7" /etc/redhat-release`; then
+    # BEGIN RHEL 7 set hostname
+    # Create DNS A/PTR records via nsupdate.sh
+    echo "${IPADDRESS}  ${EC2_NAME} ${HOSTNAME}" >>/etc/hosts
+    hostnamectl set-hostname ${EC2_NAME}
+    echo "preserve_hostname: true" >> /etc/cloud/cloud.cfg
+
+    echo; echo "### Remove existing A/PTR records"
+    yum install -y bind bind-utils wget
+
+    # TODO : BEGIN REVERSE DNS
+else
+    # BEGIN RHEL <6 set hostname
+    # Create DNS A/PTR records via dhclient option 81
+    sed -i 's/^HOSTNAME=.*$/HOSTNAME='"${HOSTNAME}.${DOMAIN}"'/' /etc/sysconfig/network
+    hostname ${EC2_NAME}
+
+    echo; echo "### Remove existing A/PTR records"
+    yum install -y bind bind-utils wget
+
+    # TODO : BEGIN REVERSE DNS
+fi
+
+echo; echo "### INSTALLING STORAGE UTILITIES"
+yum install -y dmraid mdadm lvm2 cryptsetup ntpdate
+
+echo; echo "### Ensure that nmap-ncat rpm is installed"
+yum install -y nmap-ncat
+
+echo; echo "### APPLYING SYSTEM UPDATES"
+yum update -y
+
+echo; echo "### REBOOTING SYSTEM"
+reboot

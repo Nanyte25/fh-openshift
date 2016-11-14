@@ -1,0 +1,171 @@
+---
+#TODO: Fix hard coded key filename
+#- name: Verify Master api ssl key
+#  ignore_errors: yes
+#  command: openssl rsa -in /etc/pki/tls/private/rhmpoc.com.pem -check
+#  register: key
+#  changed_when: "'unable to load Private Key' in key"
+#  failed_when: "'unable to load Private Key' in key"
+#  when: "'master' in inventory_hostname"
+#  tags:
+#    - grid
+
+#TODO: Fix hard coded crt filename
+#- name: Verify Master api ssl crt
+#  command: openssl x509 -in /etc/pki/tls/certs/rhmpoc.com.pem -text -noout
+#  register: crt
+#  changed_when: "'unable to load certificate' in crt"
+#  failed_when: "'unable to load certificate' in crt"
+#  when: "'master' in inventory_hostname"
+#  tags:
+#    - grid
+
+#TODO: Fix hard coded key filename
+#- name: Syncronize ssl key to all masters
+#  copy:
+#    src: /tmp/US-TOM-rhmpoc.com.key
+#    dest: /etc/pki/tls/private/US-TOM-rhmpoc.com.pem
+#    owner: root
+#    group: root
+#    mode: 500
+#  when: ("'master' in inventory_hostname") and ( key | failed )
+#  tags:
+#    - grid
+
+#TODO: Fix hard coded crt filename
+#- name: Syncronize ssl crt to all masters
+#  copy:
+#    src: /tmp/US-TOM-rhmpoc.com.crt
+#    dest: /etc/pki/tls/certs/US-TOM-rhmpoc.com.pem
+#    owner: root
+#    group: root
+#    mode: 500
+#  when: ("'master' in inventory_hostname") and ( crt | failed )
+#  tags:
+#    - grid
+
+- name: Installing Additional rpms
+  yum: name={{ item }} state=latest
+  with_items:
+      - wget
+      - git
+      - net-tools
+      - bind-utils
+      - iptables-services
+      - bridge-utils
+      - bash-completion
+      - rsync
+
+- name: Enabling Red Hat Subscription Manager yum repos
+  no_log: True
+  ignore_errors: yes
+  command: subscription-manager repos --enable={{ item }}
+  with_items:
+      - rhel-7-server-rpms
+      - rhel-7-server-extras-rpms
+      - rhel-7-server-ose-3.3-rpms
+  register: rhsmreg_enable_repos
+  changed_when: "'enabled for this system' not in rhsmreg_enable_repos.stdout"
+  failed_when: "'enabled for this system' not in rhsmreg_enable_repos.stdout"
+
+- name: UNregistering instances from Red Hat Subscription Manager
+  redhat_subscription:
+    state: absent
+  when: rhsmreg_enable_repos | failed
+  register: rhsmreg_absent
+
+#TODO: Investigate problem with until
+- name: Registering instances to Red Hat Subscription Manager
+  redhat_subscription:
+    username: "{{ rhsm_user }}"
+    password: "{{ rhsm_password }}"
+    state: present
+  when: rhsmreg_enable_repos | failed
+  register: rhsmreg
+  until: rhsmreg | success
+  retries: 10
+
+- name: Cancellation notice
+  debug:
+    msg: "It is 100% safe and prudent to crtl-c here if Registering task is not 100% sucessful"
+  when: rhsmreg | failed
+
+- name: Enabling Red Hat Subscription Manager pool for OSCP
+  command: subscription-manager attach --pool="{{ rhsm_pool }}"
+  when: rhsmreg_enable_repos | failed
+  register: rhsmreg_enable_pool
+
+- name: Disabling Red Hat Subscription Manager yum repos
+  command: subscription-manager repos --disable='*'
+  when: rhsmreg_enable_repos | failed
+  register: rhsmreg_disable_repos
+
+- name: Enabling Red Hat Subscription Manager yum repos
+  command: subscription-manager repos --enable={{ item }}
+  with_items:
+      - rhel-7-server-rpms
+      - rhel-7-server-extras-rpms
+      - rhel-7-server-ose-3.3-rpms
+  when: rhsmreg_enable_repos | failed
+
+- name: Stop/Disable WiFi service
+  ignore_errors: yes
+  service:
+    name: wpa_supplicant
+    state: stopped
+    enabled: false
+
+#TODO: Maybe we can clean up failed log and change definition of failed
+#      Make use of Use failed_when
+- name: Stop/Disable Firewalld service
+  ignore_errors: yes
+  service:
+    name: firewalld
+    state: stopped
+    enabled: false
+
+- name: Ensure LVM clustering is not active
+  command: lvmconf --disable-cluster
+  check_mode: no
+  changed_when: false
+
+- name: Check /etc/yum.repos.d/rhui-load-balancers.conf"
+  command: /bin/cat /etc/yum.repos.d/rhui-load-balancers.conf | /bin/grep "rhui2-cds01.us-east-1.aws.ce.redhat.com"
+  changed_when: false
+  failed_when: false
+  register: check
+
+- name: Disable RHUI East
+  lineinfile:
+    dest: "/etc/yum.repos.d/rhui-load-balancers.conf"
+    regexp: "rhui2-cds01.us-east-1.aws.ce.redhat.com"
+    state: "absent"
+  when: "'No such file or directory' not in check.stderr"
+
+- name: Check resolv.conf nameserver failover
+  ignore_errors: true
+  shell: /bin/cat /etc/resolv.conf | grep 'options timeout:3 attempts:1 rotate' > /dev/null || /bin/false
+  register: check
+  changed_when: check | failed
+
+- name: Set resolv.conf immutable
+  shell: chattr -i /etc/resolv.conf
+  when: check | failed
+
+- name: Restart networking
+  service:
+    name: network
+    state: restarted
+  when: check | failed
+
+- name: Enable resolv.conf nameserver failover
+  lineinfile:
+    dest: "/etc/resolv.conf"
+    line: "options timeout:3 attempts:1 rotate"
+    state: "present"
+  register: resolvconf
+  when: check | failed
+
+- name: Set resolv.conf immutable
+  shell: chattr +i /etc/resolv.conf
+  when: check | failed

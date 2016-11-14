@@ -1,0 +1,32 @@
+- hosts: localhost
+  connection: local
+  gather_facts: no
+  remote_user: ec2-user
+  become: no
+  vars_files:
+      - vars/main.yaml
+
+  vars_prompt:
+#TODO: Interactive prompts suck.  Move this to an env variable or something else
+    - name: domain
+      prompt: "Enter domain name (type L to list environments)(tom1-core)"
+      private: no
+
+  vars:
+    vpc_subnet_azs: "{{ lookup('ec2_zones_by_region', region).split(',') }}"
+    rhmaptmp: "{{ lookup('file', '~/.rhm/fh-aws-environment-registry.json') | from_json }}"
+    rhmap: "{{ rhmaptmp[domain] }}"
+#TODO: Need python to find the next available cidr range for public/private subnets
+
+  tasks:
+    - name: Gather RHMAP environments
+      command: jq -M -S 'keys' ~/.rhm/fh-aws-environment-registry.json
+      when: (domain == 'L')
+      register: rhmenvs
+
+    - name: List RHMAP environments
+      debug: msg="{{ rhmenvs.stdout_lines }}"
+      when: (domain == 'L')
+
+  roles:
+    - { role: aws-infrastructure, when: "domain != 'L'" }

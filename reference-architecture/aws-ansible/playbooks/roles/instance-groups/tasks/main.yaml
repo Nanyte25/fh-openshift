@@ -1,0 +1,40 @@
+---
+#- name: Add bastion to group
+#  add_host:
+#    name: "{{ hostvars[item].ec2_tag_Name }}"
+#    groups: mgt
+#    openshift_node_labels:
+#      role: oscpmgt
+#  with_items: "{{ groups['tag_Role_mgt'] }}"
+
+- name: Add masters to requisite groups
+  add_host:
+    name: "{{ hostvars[item].ec2_tag_Name }}"
+    groups: masters, etcd, nodes, cluster_hosts
+    openshift_node_labels:
+      role: oscpmaster
+  with_items: "{{ groups['tag_Role_oscpmaster'] }}"
+
+- name: Add a master to the primary masters group
+  add_host:
+    name: "{{ hostvars[item].ec2_tag_Name }}"
+    groups: primary_master
+    openshift_node_labels:
+      role: oscpmaster
+  with_items: "{{ groups['tag_Role_oscpmaster'].0 }}"
+
+- name: Add infra instances to host group
+  add_host:
+    name: "{{ hostvars[item].ec2_tag_Name }}"
+    groups: nodes, cluster_hosts, schedulable_nodes
+    openshift_node_labels:
+      role: oscpinfra
+  with_items: "{{ groups['tag_Role_oscprouter'] }}"
+
+- name: Add node instances to host group
+  add_host:
+    name: "{{ hostvars[item].ec2_tag_Name }}"
+    groups: nodes, cluster_hosts, schedulable_nodes
+    openshift_node_labels:
+      role: oscpnode
+  with_items: "{{ groups['tag_Role_oscpnode'] }}"

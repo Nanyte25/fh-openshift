@@ -1,0 +1,31 @@
+# AWS instance specific configuration
+public_hosted_zone: rhmpoc.com
+region: us-east-1
+#TODO: Change to /26 per jmernin
+public_subnet_blocks:
+  - cidr: 10.0.0.0/24
+  - cidr: 10.0.1.0/24
+  - cidr: 10.0.2.0/24
+private_subnet_blocks:
+  - cidr: 10.0.3.0/24
+  - cidr: 10.0.4.0/24
+  - cidr: 10.0.5.0/24
+ami: ami-95005f82
+keypair: OSE-key
+mgt_instance_type: t2.small
+infra_instance_type: t2.small
+master_instance_type: t2.small
+node_instance_type: t2.small
+
+# Docker images to pull
+preload_images:
+    - openshift3/ose-pod
+    - openshift3/ose-sti-builder
+    - openshift3/ose-docker-builder
+    - openshift3/ose-deployer
+
+# OSCP variables
+wildcard_zone: "apps.{{ public_hosted_zone }}"
+
+# OSCP Registry variables
+s3_username: "openshift-s3-docker-registry"

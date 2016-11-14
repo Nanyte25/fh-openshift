@@ -1,0 +1,6 @@
+DEVS=/dev/xvdb
+VG=docker-vol
+DATA_SIZE=95%VG
+SETUP_LVM_THIN_POOL=yes
+WIPE_SIGNATURES=true
+EXTRA_DOCKER_STORAGE_OPTIONS="--storage-opt dm.basesize=3G"

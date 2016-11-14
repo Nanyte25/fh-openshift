@@ -1,0 +1,100 @@
+---
+- name: Install Docker packages
+  yum: name=docker state=present
+
+- name: Install Docker additional packages
+  yum: name=docker-lvm-plugin state=present
+
+- name: Start Docker service
+  ignore_errors: yes
+  service:
+    name: docker
+    state: started
+    enabled: true
+  register: dockerservice
+
+- name: Verify Docker storage configuration
+  ignore_errors: yes
+  shell: /bin/docker info 2> /dev/null | grep 'Data loop file'
+  register: dockerstoragedriver
+  changed_when: "'Data loop file:' in dockerstoragedriver.stdout"
+  failed_when: "'Data loop file:' in dockerstoragedriver.stdout"
+
+- name: Stop Docker service
+  service: name=docker state=stopped
+  when:
+    ( dockerservice | failed ) or ( dockerstoragedriver.failed )
+
+- name: Ensure default LVM LV for Docker is removed
+  lvol: vg=docker-vol lv=docker-pool state=absent force=yes
+  when:
+    ( dockerservice | failed ) or ( dockerstoragedriver.failed )
+
+- name: Ensure default LVM VG for Docker is removed
+  ignore_errors: yes
+  shell: /sbin/vgremove docker-vol --force
+  when:
+    ( dockerservice | failed ) or ( dockerstoragedriver.failed )
+
+- name: Ensure default LVM PV for Docker is removed
+  ignore_errors: yes
+  shell: /sbin/pvremove /dev/xvdb1
+  when:
+    ( dockerservice | failed ) or ( dockerstoragedriver.failed )
+
+- name: Ensure default filesystems for Docker are removed
+  ignore_errors: yes
+  shell: /sbin/parted /dev/xvdb rm 1;
+  when:
+    ( dockerservice | failed ) or ( dockerstoragedriver.failed )
+
+- name: Ensure default disks for Docker are removed
+  ignore_errors: yes
+  shell: /sbin/dmsetup remove_all
+  when:
+    ( dockerservice | failed ) or ( dockerstoragedriver.failed )
+
+- name: Ensure Docker docker-storage-setup config file is removed
+  ignore_errors: yes
+  file: name=/etc/sysconfig/docker-storage-setup state=absent
+  when:
+    ( dockerservice | failed ) or ( dockerstoragedriver.failed )
+
+- name: Create Docker docker-storage-setup config file
+  ignore_errors: yes
+  copy:
+    src: "{{ role_path }}/files/docker-storage-setup"
+    dest: /etc/sysconfig/docker-storage-setup
+    owner: root
+    group: root
+    mode: 0644
+  when:
+    ( dockerservice | failed ) or ( dockerstoragedriver.failed )
+
+- name: Reset Docker storage directory
+  ignore_errors: yes
+  file: >
+    state=absent
+    path=/var/lib/docker/
+  when:
+    ( dockerservice | failed ) or ( dockerstoragedriver.failed )
+
+- name: Execute Docker storage setup
+  ignore_errors: yes
+  shell: /bin/docker-storage-setup --reset
+  when:
+    ( dockerservice | failed ) or ( dockerstoragedriver.failed )
+
+- name: Reset Docker storage
+  ignore_errors: yes
+  shell: /bin/docker-storage-setup
+  when:
+    ( dockerservice | failed ) or ( dockerstoragedriver.failed )
+
+- name: Start Docker service
+  service:
+    name: docker
+    state: started
+    enabled: true
+  when:
+    ( dockerservice | failed ) or ( dockerstoragedriver.failed )

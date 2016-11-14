@@ -1,0 +1,29 @@
+---
+- name: Create filesystem for /var/lib/etcd
+  filesystem:
+      fstype: xfs
+      dev: /dev/xvdb
+  register: fs_xvdb
+
+- name: Create filesystem label for /var/lib/etcd
+  command: xfs_admin -L ETCD /dev/xvdb
+
+- name: Create local volumes directory
+  file:
+      path: /var/lib/etcd
+      state: directory
+      recurse: yes
+
+- name: Create fstab entry
+  mount:
+      name: /var/lib/etcd
+      src: LABEL=ETCD
+      fstype: xfs
+      state: present
+
+- name: Mount fstab entry
+  mount:
+      name: /var/lib/etcd
+      src: LABEL=ETCD
+      fstype: xfs
+      state: mounted

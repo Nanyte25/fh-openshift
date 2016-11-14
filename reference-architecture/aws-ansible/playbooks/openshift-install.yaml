@@ -1,0 +1,68 @@
+- hosts: localhost
+  connection: local
+  gather_facts: no
+  become: no
+  run_once: yes
+  vars_files:
+      - vars/main.yaml
+  roles:
+      - instance-groups
+
+#TODO: Make docker-storage-setup dynamic.  Admins should be able to
+#      add/remove AWS EBS volumes
+#TODO: Interactive prompts suck.  Do better
+- hosts: cluster_hosts
+  gather_facts: yes
+  become: yes
+  user: ec2-user
+  vars_prompt:
+    - name: "rhsm_pool"
+      prompt: "Enter your Red Hat Subscription Manager license pool (8a85f981568e999d01568ed2241a67c2)?"
+      private: no
+    - name: "rhsm_user"
+      prompt: "Enter your Red Hat Subscription Manager username?"
+      private: no
+    - name: "rhsm_password"
+      prompt: "Enter your Red Hat Subscription Manager password?"
+      private: yes
+  vars_files:
+      - vars/main.yaml
+  roles:
+      - prerequisites
+      - docker
+
+- hosts: schedulable_nodes
+  gather_facts: no
+  become: yes
+  vars_files:
+      - vars/openshift-setup.yaml
+      - vars/main.yaml
+  roles:
+      - openshift-images
+#      - openshift-emptydir-quota
+
+#- hosts: primary_master
+#  gather_facts: no
+#  become: yes
+#  vars_files:
+#      - vars/main.yaml
+#  roles:
+#      - openshift-registry
+#
+#- hosts: masters
+#  gather_facts: no
+#  become: yes
+#  serial: 1
+#  user: ec2-user
+#  vars_files:
+#      - vars/main.yaml
+#  roles:
+#      - openshift-default-selector
+
+#- hosts: primary_master
+#  gather_facts: no
+#  become: yes
+#  vars_files:
+#      - vars/main.yaml
+#  roles:
+#      - openshift-infra-pod-scale
