@@ -37,7 +37,8 @@ the openshift-ansible repository
 
   NOTE: that the static data values Hostname need to be dealt with manually at this time
 
-```Host US-TOM
+```
+Host US-TOM
      User                       ec2-user
      Hostname                   54.82.151.107
      User                       ec2-user
@@ -80,10 +81,12 @@ Host 10.*
      ProxyCommand           ssh -qaY ec2-user@US-TOM 'nc -w 14400ms %h %p'
      ControlMaster          auto
      ControlPath            ~/.ssh/mux-%r@%h:%p
-     ControlPersist         8h```
+     ControlPersist         8h
+```
 
   Prepare Ansible client / ansible.cfg
-```# config file for ansible -- http://ansible.com/
+```
+# config file for ansible -- http://ansible.com/
 # ==============================================
 [defaults]
 #callback_plugins = ../openshift-ansible/ansible-profile/callback_plugins
@@ -105,7 +108,8 @@ become = True
 ssh_args = -F /Users/ccallega/.ssh/config -o ForwardAgent=yes -o ControlMaster=auto -o ControlPersist=900s
 #pipelining = True
 #scp_if_ssh = True
-control_path = ~/.ssh/mux-%%r@%%h:%%p```
+control_path = ~/.ssh/mux-%%r@%%h:%%p
+```
 
   Prepare Ansible dynamic inventory
 
@@ -113,7 +117,8 @@ control_path = ~/.ssh/mux-%%r@%%h:%%p```
 
   Prepare Ansible hosts file / inventory/aws/hosts/hosts
 
-```# Create an OSEv3 group that contains the masters and nodes groups
+```
+# Create an OSEv3 group that contains the masters and nodes groups
 [OSEv3:children]
 masters
 nodes
@@ -208,7 +213,8 @@ openshift_hosted_registry_storage_s3_chunksize=26214400
 openshift_hosted_registry_storage_s3_rootdirectory=/registry
 openshift_hosted_registry_pullthrough=true
 openshift_hosted_registry_acceptschema2=true
-openshift_hosted_registry_enforcequota=true```
+openshift_hosted_registry_enforcequota=true
+```
 
 
   Execute Ansible playbook
