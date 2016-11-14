@@ -1,30 +1,32 @@
-#OpenShift and Atomic Platform Ansible Contrib
+# OpenShift and Atomic Platform Ansible Contrib
 
 This repo contains *unsupported* code that is to be used in conjunction with
 the openshift-ansible repository
 
-Workflow:
+## Workflow:
 
-Create your environment
+### Create your environment
   Create Python virtual env
   Pip install boto, boto3, socket
   Install Ansible 2.2.0 from source / http://docs.ansible.com/ansible/intro_installation.html#running-from-source
 
-  git clone fh-openshift
+  git clone https://github.com/feedhenry/fh-openshift
   git clone https://github.com/openshift/openshift-ansible.git
 
-Deploy rhm site infrastructure
+### Deploy rhm site infrastructure
   ansible-playbook playbooks/aws-infrastructure.yaml --tags grid (soon to be site)
 
-Deploy rhm rhmap infrastructure
+### Deploy rhm rhmap infrastructure
   ansible-playbook playbooks/aws-infrastructure.yaml --tags rhmap
 
-Prepare infrastructure
+### Prepare infrastructure
   ansible-playbook playbooks/openshift-install.yaml
-  Subscription manager pool and account credentials req'd!
+  Subscription account credentials and manager pool req'd!
 
-Install OpenShift - Note that the static data values Hostname need to be dealt with manually at this time
+### Install OpenShift
   Prepare ssh client / vi ~/.ssh/conf
+  Note that the static data values Hostname need to be dealt with manually at this time
+```
 Host US-TOM
      User                       ec2-user
      Hostname                   54.82.151.107
@@ -69,9 +71,11 @@ Host 10.*
      ControlMaster          auto
      ControlPath            ~/.ssh/mux-%r@%h:%p
      ControlPersist         8h
+```
 
 
   Prepare Ansible client / ansible.cfg
+```
 # config file for ansible -- http://ansible.com/
 # ==============================================
 [defaults]
@@ -95,11 +99,14 @@ ssh_args = -F /Users/ccallega/.ssh/config -o ForwardAgent=yes -o ControlMaster=a
 #pipelining = True
 #scp_if_ssh = True
 control_path = ~/.ssh/mux-%%r@%%h:%%p
+```
 
 
-  Prepare Ansible dynamic inventory / inventory/aws/hosts/ec2.py --refresh-cache
+  Prepare Ansible dynamic inventory
+    inventory/aws/hosts/ec2.py --refresh-cache
 
   Prepare Ansible hosts file / inventory/aws/hosts/hosts
+    More to come here
 
   Execute Ansible playbook
-  ansible-playbook -i inventory/aws/hosts playbooks/byo/openshift-cluster/config.yml
+    ansible-playbook -i inventory/aws/hosts playbooks/byo/openshift-cluster/config.yml
